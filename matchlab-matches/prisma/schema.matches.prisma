@@ -1,0 +1,124 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+/// Справочник лиг. Код совпадает с кодом football-data.co.uk и используется
+/// как стабильный ключ связи с командами, матчами и снимками индекса.
+model League {
+  code      String   @id
+  name      String
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  teams           Team[]
+  fixtures        Fixture[]
+  cornerSnapshots CornerIndexSnapshot[]
+
+  @@map("leagues")
+}
+
+/// Наш справочник команд. Названия источника сюда не попадают напрямую —
+/// для них есть TeamAlias.
+model Team {
+  id         String   @id @default(cuid())
+  leagueCode String   @map("league_code")
+  name       String
+  slug       String   @unique
+  crestUrl   String?  @map("crest_url")
+  createdAt  DateTime @default(now()) @map("created_at")
+  updatedAt  DateTime @updatedAt @map("updated_at")
+
+  league        League                @relation(fields: [leagueCode], references: [code])
+  aliases       TeamAlias[]
+  homeFixtures  Fixture[]             @relation("HomeTeam")
+  awayFixtures  Fixture[]             @relation("AwayTeam")
+  cornerIndexes CornerIndexSnapshot[]
+
+  @@unique([leagueCode, name])
+  @@unique([leagueCode, id])
+  @@index([leagueCode])
+  @@map("teams")
+}
+
+/// Написание названия команды во внешнем источнике: «Ath Bilbao», «Man United».
+/// Без этой таблицы угловой индекс и расписание не сойдутся на одну команду.
+model TeamAlias {
+  id     String @id @default(cuid())
+  teamId String @map("team_id")
+  source String // 'football-data.co.uk', 'api-football', ...
+  alias  String
+
+  team Team @relation(fields: [teamId], references: [id], onDelete: Cascade)
+
+  @@unique([source, alias])
+  @@index([teamId])
+  @@map("team_aliases")
+}
+
+enum FixtureStatus {
+  SCHEDULED
+  LIVE
+  FINISHED
+  POSTPONED
+  CANCELLED
+}
+
+/// Матч календаря. kickoffAt всегда в UTC.
+model Fixture {
+  id               String        @id @default(cuid())
+  /// Ключ идемпотентности: источник + лига + дата + команды.
+  /// Файл расписания перезаписывается целиком, поэтому повторная загрузка
+  /// должна обновлять строку, а не плодить дубли.
+  externalKey      String        @unique @map("external_key")
+  source           String
+  leagueCode       String        @map("league_code")
+  kickoffAt        DateTime      @map("kickoff_at")
+  /// Час начала у источника иногда пуст: дата известна, время — нет.
+  kickoffTimeKnown Boolean       @default(true) @map("kickoff_time_known")
+  status           FixtureStatus @default(SCHEDULED)
+  homeTeamId       String        @map("home_team_id")
+  awayTeamId       String        @map("away_team_id")
+  homeGoals        Int?          @map("home_goals")
+  awayGoals        Int?          @map("away_goals")
+  createdAt        DateTime      @default(now()) @map("created_at")
+  updatedAt        DateTime      @updatedAt @map("updated_at")
+
+  homeTeam Team   @relation("HomeTeam", fields: [leagueCode, homeTeamId], references: [leagueCode, id])
+  awayTeam Team   @relation("AwayTeam", fields: [leagueCode, awayTeamId], references: [leagueCode, id])
+  league   League @relation(fields: [leagueCode], references: [code])
+
+  // Основная выборка — «матчи в интервале времени по набору лиг»,
+  // поэтому ведущее поле индекса именно kickoffAt.
+  @@index([kickoffAt, leagueCode])
+  @@index([leagueCode, kickoffAt])
+  @@index([homeTeamId])
+  @@index([awayTeamId])
+  @@map("fixtures")
+}
+
+/// Снимок углового индекса. Историчность нужна для спарклайна тренда,
+/// а последний снимок на команду — для отбора матчей в блок «Ближайшие».
+model CornerIndexSnapshot {
+  id         String   @id @default(cuid())
+  teamId     String   @map("team_id")
+  leagueCode String   @map("league_code")
+  computedAt DateTime @map("computed_at")
+  windowN    Int      @map("window_n")
+  matches    Int
+  rawIndex   Float?   @map("raw_index")
+  ci         Float?
+  grade      String?
+  enoughData Boolean  @default(false) @map("enough_data")
+
+  team   Team   @relation(fields: [leagueCode, teamId], references: [leagueCode, id], onDelete: Cascade)
+  league League @relation(fields: [leagueCode], references: [code])
+
+  @@unique([teamId, computedAt])
+  @@index([leagueCode, computedAt])
+  @@map("corner_index_snapshots")
+}
